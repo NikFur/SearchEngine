@@ -241,6 +241,10 @@ html [type="button"],
 [type="submit"] {
   -webkit-appearance: button;
 }
+.highlight {
+    background-color: yellow;
+    font-weight: bold;
+}
 /**
  * Remove the inner border and padding in Firefox
  */
