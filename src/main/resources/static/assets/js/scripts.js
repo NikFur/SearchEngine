@@ -1950,18 +1950,6 @@ Tabs().init();
 // }, 100);
 });
 })(jQuery);
-document.addEventListener("DOMContentLoaded", function () {
-    const links = document.querySelectorAll("a"); // Находим все ссылки
-
-    links.forEach(link => {
-        link.addEventListener("click", function (event) {
-            const query = new URLSearchParams(window.location.search).get("query");
-            if (query) {
-                sessionStorage.setItem("query", query); // Сохраняем query перед переходом
-            }
-        });
-    });
-});
 
 
 
