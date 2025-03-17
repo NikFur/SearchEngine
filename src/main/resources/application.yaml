@@ -17,11 +17,11 @@ spring:
   jpa:
     show-sql: true
     hibernate:
-      ddl-auto: create  # ⚠️ НЕ create! Теперь данные сохраняются
+      ddl-auto: create
       dialect: org.hibernate.dialect.MySQL8Dialect
     properties:
       hibernate:
-        jdbc.time_zone: UTC  # ⚡ Исправляет возможные проблемы с датами
+        jdbc.time_zone: UTC
 
 logging:
   level:

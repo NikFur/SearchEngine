@@ -1,9 +1,8 @@
 package searchengine.services;
 
+import lombok.extern.slf4j.Slf4j;
 import org.jsoup.Jsoup;
 import org.jsoup.nodes.Document;
-import org.jsoup.nodes.Element;
-import org.springframework.context.ApplicationContext;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import searchengine.config.SiteConfig;
@@ -16,13 +15,13 @@ import searchengine.repositories.SiteRepository;
 
 import java.net.URL;
 import java.time.LocalDateTime;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Optional;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.*;
+import java.util.concurrent.ForkJoinPool;
+import java.util.concurrent.RecursiveAction;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
+@Slf4j
 @Service
 public class IndexingServiceImpl implements IndexingService {
 
@@ -32,265 +31,206 @@ public class IndexingServiceImpl implements IndexingService {
     private final IndexRepository indexRepository;
     private final LemmaService lemmaService;
     private final SitesList sitesList;
-    private final ApplicationContext applicationContext;
 
-    private volatile boolean indexingInProgress = false;
-    private volatile boolean indexingStopped = false; // Флаг остановки индексации
-    private ExecutorService executor = Executors.newCachedThreadPool();
+    private final AtomicBoolean indexingInProgress = new AtomicBoolean(false);
+    private ForkJoinPool forkJoinPool = new ForkJoinPool();
 
     public IndexingServiceImpl(SiteRepository siteRepository,
                                PageRepository pageRepository,
                                LemmaRepository lemmaRepository,
                                IndexRepository indexRepository,
                                LemmaService lemmaService,
-                               SitesList sitesList,
-                               ApplicationContext applicationContext) {
+                               SitesList sitesList) {
         this.siteRepository = siteRepository;
         this.pageRepository = pageRepository;
         this.lemmaRepository = lemmaRepository;
         this.indexRepository = indexRepository;
         this.lemmaService = lemmaService;
         this.sitesList = sitesList;
-        this.applicationContext = applicationContext;
     }
 
     @Override
-    public synchronized boolean isIndexingInProgress() {
-        return indexingInProgress;
+    public boolean isIndexingInProgress() {
+        return indexingInProgress.get();
     }
 
     @Transactional
     @Override
     public synchronized void startIndexing() {
-        if (indexingInProgress) {
-            System.out.println("[ИНДЕКСАЦИЯ] Уже запущена! Выход.");
+        if (indexingInProgress.get()) {
+            log.warn("[ИНДЕКСАЦИЯ] Уже запущена! Выход.");
             return;
         }
 
-        System.out.println("[ИНДЕКСАЦИЯ] Старт индексации!");
-        indexingInProgress = true;
-        indexingStopped = false;
+        log.info("[ИНДЕКСАЦИЯ] Полный перезапуск индексации!");
+        indexingInProgress.set(true);
 
-        if (executor.isShutdown() || executor.isTerminated()) {
-            executor = Executors.newCachedThreadPool();
+        indexRepository.deleteAll();
+        lemmaRepository.deleteAll();
+        pageRepository.deleteAll();
+        siteRepository.deleteAll();
+
+        if (forkJoinPool.isShutdown() || forkJoinPool.isTerminated()) {
+            forkJoinPool = new ForkJoinPool();
         }
 
-        // Используем сайты, уже сохранённые в базе.
-        List<SiteConfig> configuredSites = sitesList.getSites();
-
-        for (SiteConfig siteConfig : configuredSites) {
-            System.out.println("[ИНДЕКСАЦИЯ] Обработка сайта: " + siteConfig.getUrl());
-
-            // Получаем список сайтов с данным URL (избегая дубликатов)
-            List<Site> sites = siteRepository.findByUrl(siteConfig.getUrl());
-            Site site;
-            if (!sites.isEmpty()) {
-                site = sites.get(0);
-                System.out.println("[ИНДЕКСАЦИЯ] Сайт найден, обновляем статус: " + siteConfig.getUrl());
-            } else {
-                site = new Site();
-                site.setUrl(siteConfig.getUrl());
-                site.setName(siteConfig.getName());
-                site.setStatus(Status.INDEXING);
-                site.setStatusTime(LocalDateTime.now());
-                siteRepository.save(site);
-                System.out.println("[ИНДЕКСАЦИЯ] Сайт не найден, создаем новый: " + siteConfig.getUrl());
-            }
-
-            // Обновляем статус и сбрасываем ошибку
-            site.setStatus(Status.INDEXING);
-            site.setStatusTime(LocalDateTime.now());
-            site.setLastError(null);
-            siteRepository.save(site);
-
-            executor.submit(() -> {
-                System.out.println("[ИНДЕКСАЦИЯ] Начинаем индексацию для сайта: " + site.getUrl());
-                indexSite(siteConfig);
-            });
-        }
-    }
-
-    @Transactional
-    @Override
-    public void indexSite(SiteConfig siteConfig) {
-        System.out.println("[ИНДЕКСАЦИЯ] Запуск индексации для сайта: " + siteConfig.getUrl());
-
-        // Получаем сайт по URL (используем findByUrl, который возвращает список, и берем первую запись)
-        List<Site> sites = siteRepository.findByUrl(siteConfig.getUrl());
-        Site site;
-        if (!sites.isEmpty()) {
-            site = sites.get(0);
-            System.out.println("[ИНДЕКСАЦИЯ] Сайт найден, продолжаем индексацию: " + siteConfig.getUrl());
-        } else {
-            // Эта ситуация маловероятна, так как сайт должен уже быть сохранён при запуске индексации
-            site = new Site();
+        for (SiteConfig siteConfig : sitesList.getSites()) {
+            Site site = new Site();
             site.setUrl(siteConfig.getUrl());
             site.setName(siteConfig.getName());
-            System.out.println("[ИНДЕКСАЦИЯ] Сайт не найден, создаем новый: " + siteConfig.getUrl());
-        }
-
-        // Обновляем статус, время и сбрасываем ошибки
-        site.setStatus(Status.INDEXING);
-        site.setStatusTime(LocalDateTime.now());
-        site.setLastError(null);
-        siteRepository.save(site);
-
-        try {
-            System.out.println("[ИНДЕКСАЦИЯ] Начинаем обход страниц для сайта: " + site.getUrl());
-            crawlPages(site.getUrl(), site);
-            site.setStatus(Status.INDEXED);
-            System.out.println("[ИНДЕКСАЦИЯ] Индексация завершена для сайта: " + site.getUrl());
-        } catch (Exception e) {
-            site.setStatus(Status.FAILED);
-            site.setLastError(e.getMessage());
-            System.out.println("[ИНДЕКСАЦИЯ] Ошибка при индексации сайта: " + site.getUrl());
-            e.printStackTrace();
-        } finally {
+            site.setStatus(Status.INDEXING);
             site.setStatusTime(LocalDateTime.now());
             siteRepository.save(site);
-            System.out.println("[ИНДЕКСАЦИЯ] Завершено обновление статуса сайта: " + site.getUrl());
+
+            log.info("[ИНДЕКСАЦИЯ] Старт индексации для сайта: {}", site.getUrl());
+            forkJoinPool.submit(new CrawlTask(site.getUrl(), site));
         }
     }
 
-    @Transactional
-    public void crawlPages(String url, Site site) {
-        if (!indexingInProgress || indexingStopped) {
-            System.out.println("[ОБХОД] Индексация остановлена. Выход.");
-            return;
+    private class CrawlTask extends RecursiveAction {
+        private final String url;
+        private final Site site;
+
+        public CrawlTask(String url, Site site) {
+            this.url = url;
+            this.site = site;
         }
 
-        try {
-            System.out.println("[ОБХОД] Анализируем страницу: " + url);
-            Thread.sleep(500);
-
-            if (!indexingInProgress || indexingStopped) {
-                System.out.println("[ОБХОД] Индексация остановлена после задержки. Выход.");
+        @Override
+        protected void compute() {
+            if (!indexingInProgress.get()) {
+                log.info("[ОБХОД] Индексация остановлена, выходим из задачи для: {}", url);
                 return;
             }
 
-            URL parsedUrl = new URL(url);
-            String uri = parsedUrl.getPath();
-            if (uri == null || uri.isBlank()) {
-                uri = "/";
-            }
+            try {
+                log.info("[ОБХОД] Анализируем страницу: {}", url);
+                Thread.sleep(500);
 
-            if (pageRepository.existsByPathAndSite(uri, site)) {
-                System.out.println("[ОБХОД] Страница уже существует в БД: " + uri);
-                return;
-            }
+                URL parsedUrl = new URL(url);
+                String uri = parsedUrl.getPath().isBlank() ? "/" : parsedUrl.getPath();
 
-            Document doc = Jsoup.connect(url)
-                    .userAgent("Mozilla/5.0 (compatible; MySearchBot/1.0)")
-                    .timeout(10000)
-                    .get();
-
-            System.out.println("[ОБХОД] Успешно скачан HTML-код страницы: " + url);
-
-            // Сохраняем страницу
-            Page page = new Page();
-            page.setSite(site);
-            page.setPath(uri);
-            page.setUri(uri);
-            page.setContent(doc.html());
-            page.setCode(200);
-            pageRepository.save(page);
-            System.out.println("[ОБХОД] Страница сохранена в БД: " + uri);
-
-            // Извлекаем и сохраняем леммы
-            Map<String, Integer> lemmas = lemmaService.extractLemmas(doc.text());
-            System.out.println("[ОБХОД] Найдено " + lemmas.size() + " лемм на странице.");
-
-            lemmas.forEach((lemmaText, count) -> {
-                try {
-                    Lemma lemma = lemmaRepository.findByLemmaAndSite(lemmaText, site)
-                            .orElseGet(() -> {
-                                Lemma newLemma = new Lemma();
-                                newLemma.setLemma(lemmaText);
-                                newLemma.setSite(site);
-                                newLemma.setFrequency(0);
-                                return newLemma;
-                            });
-
-                    lemma.setFrequency(lemma.getFrequency() + count);
-                    lemmaRepository.save(lemma);
-
-                    SearchIndex index = new SearchIndex();
-                    index.setPage(page);
-                    index.setLemma(lemma);
-                    index.setRank((float) count);
-                    indexRepository.save(index);
-
-                    System.out.println("[ОБХОД] Лемма сохранена: " + lemmaText + " (встречается " + count + " раз)");
-                } catch (Exception e) {
-                    System.out.println("[ОШИБКА] Ошибка при сохранении леммы: " + lemmaText);
-                    e.printStackTrace();
+                if (pageRepository.existsByPathAndSite(uri, site)) {
+                    log.info("[ОБХОД] Страница уже существует в БД: {}", uri);
+                    return;
                 }
-            });
 
-            // Рекурсивный обход ссылок
-            doc.select("a[href]").stream()
-                    .map(link -> link.absUrl("href"))
-                    .filter(href -> href.startsWith(site.getUrl()))
-                    .distinct()
-                    .forEach(linkUrl -> {
-                        if (!indexingStopped) {
-                            System.out.println("[ОБХОД] Найдена ссылка: " + linkUrl);
-                            crawlPages(linkUrl, site);
-                        }
-                    });
+                Document doc = Jsoup.connect(url)
+                        .userAgent("Mozilla/5.0 (compatible; MySearchBot/1.0)")
+                        .timeout(10000)
+                        .get();
 
-        } catch (Exception e) {
-            System.out.println("[ОШИБКА] Ошибка при обработке страницы: " + url);
-            e.printStackTrace();
-            site.setStatus(Status.FAILED);
-            site.setLastError(e.getMessage());
-            siteRepository.save(site);
+                log.info("[ОБХОД] Успешно скачан HTML-код страницы: {}", url);
+
+                Page page = new Page();
+                page.setSite(site);
+                page.setPath(uri);
+                page.setUri(uri);
+                page.setContent(doc.html());
+                page.setCode(200);
+                pageRepository.save(page);
+                log.info("[ОБХОД] Страница сохранена в БД: {}", uri);
+
+                saveLemmas(page, doc.text());
+
+                List<CrawlTask> subTasks = new ArrayList<>();
+                doc.select("a[href]").stream()
+                        .map(link -> link.absUrl("href"))
+                        .filter(href -> href.startsWith(site.getUrl())
+                                && !href.equals(site.getUrl())
+                                && !href.contains("#"))
+                        .distinct()
+                        .forEach(linkUrl -> {
+                            log.info("[ОБХОД] Найдена ссылка: {}", linkUrl);
+                            subTasks.add(new CrawlTask(linkUrl, site));
+                        });
+
+                invokeAll(subTasks);
+
+            } catch (Exception e) {
+                log.error("[ОШИБКА] Ошибка при обработке {}: {}", url, e.getMessage(), e);
+                site.setStatus(Status.FAILED);
+                site.setLastError(e.getMessage());
+                siteRepository.save(site);
+            }
         }
     }
 
-    @Transactional
+    private void saveLemmas(Page page, String text) {
+        Map<String, Integer> lemmas = lemmaService.extractLemmas(text);
+        log.info("[ЛЕММЫ] Найдено {} лемм на странице {}", lemmas.size(), page.getPath());
+
+        lemmas.forEach((lemmaText, count) -> {
+            try {
+                Lemma lemma = lemmaRepository.findByLemmaAndSite(lemmaText, page.getSite())
+                        .orElseGet(() -> {
+                            Lemma newLemma = new Lemma();
+                            newLemma.setLemma(lemmaText);
+                            newLemma.setSite(page.getSite());
+                            newLemma.setFrequency(0);
+                            return newLemma;
+                        });
+
+                lemma.setFrequency(lemma.getFrequency() + count);
+                lemmaRepository.save(lemma);
+
+                SearchIndex index = new SearchIndex();
+                index.setPage(page);
+                index.setLemma(lemma);
+                index.setRank((float) count);
+                indexRepository.save(index);
+
+                log.info("[ЛЕММЫ] Лемма '{}' сохранена, встречается {} раз (страница: {})",
+                        lemmaText, count, page.getPath());
+            } catch (Exception e) {
+                log.error("[ОШИБКА] Ошибка при сохранении леммы '{}'", lemmaText, e);
+            }
+        });
+    }
+
     @Override
     public synchronized void stopIndexing() {
-        if (!indexingInProgress) {
-            System.out.println("[ИНДЕКСАЦИЯ] Уже остановлена!");
+        if (!indexingInProgress.get()) {
+            log.warn("[ИНДЕКСАЦИЯ] Уже остановлена!");
             return;
         }
 
-        System.out.println("[ИНДЕКСАЦИЯ] Остановка индексации...");
-        indexingInProgress = false;
-        indexingStopped = true;
+        log.info("[ИНДЕКСАЦИЯ] Остановка индексации...");
+        indexingInProgress.set(false);
 
-        executor.shutdownNow();
-        System.out.println("[ИНДЕКСАЦИЯ] Все потоки остановлены!");
+        forkJoinPool.shutdown();
+        try {
+            if (!forkJoinPool.awaitTermination(5, TimeUnit.SECONDS)) {
+                forkJoinPool.shutdownNow();
+            }
+        } catch (InterruptedException e) {
+            forkJoinPool.shutdownNow();
+            Thread.currentThread().interrupt();
+        }
+
+        log.info("[ИНДЕКСАЦИЯ] Все задачи остановлены!");
     }
 
-    @Transactional
     @Override
     public boolean indexPage(String url) {
         try {
             Optional<SiteConfig> optionalConfig = sitesList.getSites().stream()
                     .filter(configSite -> url.startsWith(configSite.getUrl()))
                     .findFirst();
-
             if (optionalConfig.isEmpty()) {
                 return false;
             }
 
             SiteConfig siteConfig = optionalConfig.get();
-
-            List<Site> sites = siteRepository.findByUrl(siteConfig.getUrl());
-            if (sites.isEmpty()) {
+            Optional<Site> optionalSite = siteRepository.findFirstByUrl(siteConfig.getUrl());
+            if (optionalSite.isEmpty()) {
                 return false;
             }
 
-            Site site = sites.get(0);
-
-            // Правильно извлекаем URI из URL
+            Site site = optionalSite.get();
             URL parsedUrl = new URL(url);
-            String uri = parsedUrl.getPath();
-            if (uri.isBlank()) uri = "/";
+            String uri = parsedUrl.getPath().isBlank() ? "/" : parsedUrl.getPath();
 
-            // Удаление существующих страниц с тем же URI (при индексировании отдельной страницы)
             List<Page> existingPages = pageRepository.findByPathAndSite(uri, site);
             if (!existingPages.isEmpty()) {
                 pageRepository.deleteAll(existingPages);
@@ -301,7 +241,6 @@ public class IndexingServiceImpl implements IndexingService {
                     .timeout(10000)
                     .get();
 
-            // Создание новой страницы
             Page page = new Page();
             page.setSite(site);
             page.setPath(uri);
@@ -310,33 +249,11 @@ public class IndexingServiceImpl implements IndexingService {
             page.setCode(200);
             pageRepository.save(page);
 
-            Map<String, Integer> lemmas = lemmaService.extractLemmas(doc.text());
-            Map<String, Lemma> lemmaCache = new HashMap<>();
-
-            lemmas.forEach((lemmaText, count) -> {
-                Lemma lemma = lemmaCache.computeIfAbsent(lemmaText, key ->
-                        lemmaRepository.findByLemmaAndSite(key, site)
-                                .orElseGet(() -> {
-                                    Lemma newLemma = new Lemma();
-                                    newLemma.setLemma(key);
-                                    newLemma.setSite(site);
-                                    newLemma.setFrequency(0);
-                                    return newLemma;
-                                })
-                );
-                lemma.setFrequency(lemma.getFrequency() + count);
-                lemmaRepository.save(lemma);
-
-                SearchIndex index = new SearchIndex();
-                index.setPage(page);
-                index.setLemma(lemma);
-                index.setRank((float) count);
-                indexRepository.save(index);
-            });
+            saveLemmas(page, doc.text());
 
             return true;
         } catch (Exception e) {
-            e.printStackTrace();
+            log.error("[ОШИБКА] Ошибка при индексации страницы {}", url, e);
             return false;
         }
     }

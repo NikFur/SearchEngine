@@ -7,7 +7,7 @@ import java.time.LocalDateTime;
 import java.time.ZoneId;
 
 @Entity
-@Table(name = "sites", uniqueConstraints = @UniqueConstraint(columnNames = "url"))
+@Table(name = "sites")
 @Data
 public class Site {
 
@@ -16,7 +16,7 @@ public class Site {
     @Column(name = "id", nullable = false, updatable = false)
     private Integer id;
 
-    @Column(nullable = false, unique = true)
+    @Column(nullable = false)
     private String url;
 
     @Column(nullable = false)

@@ -1,6 +1,9 @@
 package searchengine.services;
 
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.apache.lucene.morphology.LuceneMorphology;
+import org.apache.lucene.morphology.russian.RussianLuceneMorphology;
 import org.jsoup.Jsoup;
 import org.jsoup.nodes.Document;
 import org.jsoup.nodes.Element;
@@ -12,9 +15,14 @@ import searchengine.model.Site;
 import searchengine.repositories.PageRepository;
 import searchengine.repositories.SiteRepository;
 
+
+import java.io.IOException;
 import java.util.*;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
+@Slf4j
 @Service
 @RequiredArgsConstructor
 public class SearchServiceImpl implements SearchService {
@@ -77,7 +85,6 @@ public class SearchServiceImpl implements SearchService {
         return bodyText.substring(0, Math.min(50, bodyText.length())) + "...";
     }
 
-    // ✅ Обновлённый метод создания сниппета
     private String createSnippet(String content, String query) {
         final int snippetLength = 200;
         if (content == null || content.isBlank()) {
@@ -85,6 +92,7 @@ public class SearchServiceImpl implements SearchService {
         }
 
         String text = Jsoup.parse(content).text();
+
         Map<String, Integer> queryLemmas = lemmaService.extractLemmas(query);
         Set<String> queryLemmaSet = queryLemmas.keySet();
 
@@ -96,9 +104,22 @@ public class SearchServiceImpl implements SearchService {
         int endPosition = Math.min(text.length(), startPosition + snippetLength);
         String snippet = text.substring(startPosition, endPosition).trim();
 
-        // Подсветка слов в сниппете
+        Set<String> allQueryForms = new HashSet<>();
         for (String lemma : queryLemmaSet) {
-            snippet = snippet.replaceAll("(?i)(" + lemma + ")", "<span class=\"highlight\">$1</span>");
+            allQueryForms.add(lemma);
+            allQueryForms.addAll(getAllForms(lemma));
+        }
+
+        for (String form : allQueryForms) {
+            String escapedForm = Pattern.quote(form);
+            Pattern pattern = Pattern.compile("(?iu)(?<=^|[^\\p{L}])" + escapedForm + "(?=[^\\p{L}]|$)");
+            Matcher matcher = pattern.matcher(snippet);
+            StringBuffer sb = new StringBuffer();
+            while (matcher.find()) {
+                matcher.appendReplacement(sb, "<b>" + matcher.group() + "</b>");
+            }
+            matcher.appendTail(sb);
+            snippet = sb.toString();
         }
 
         if (endPosition < text.length()) {
@@ -108,6 +129,23 @@ public class SearchServiceImpl implements SearchService {
         return snippet;
     }
 
+    private List<String> getAllForms(String lemma) {
+        List<String> forms = new ArrayList<>();
+        try {
+            LuceneMorphology morphology = new RussianLuceneMorphology();
+            List<String> morphInfos = morphology.getMorphInfo(lemma);
+            for (String info : morphInfos) {
+                String form = info.split("\\|")[0].trim();
+                if (!forms.contains(form)) {
+                    forms.add(form);
+                }
+            }
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+        log.info("Формы для '{}' : {}", lemma, forms);
+        return forms;
+    }
 
 
     private int findLemmaPosition(String cleanText, Set<String> queryLemmaSet) {
@@ -137,4 +175,5 @@ public class SearchServiceImpl implements SearchService {
 
         return totalWords > 0 ? (float) totalOccurrences / totalWords : 0;
     }
+
 }

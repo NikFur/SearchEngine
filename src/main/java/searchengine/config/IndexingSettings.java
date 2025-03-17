@@ -1,9 +1,8 @@
-package searchengine.services;
+package searchengine.config;
 
 import lombok.Data;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.context.annotation.Configuration;
-import searchengine.config.SiteConfig;
 
 import java.util.List;
 

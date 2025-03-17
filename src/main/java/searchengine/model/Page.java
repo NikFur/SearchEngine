@@ -1,11 +1,7 @@
 package searchengine.model;
 
 import jakarta.persistence.*;
-import jakarta.persistence.Index;
-import lombok.AllArgsConstructor;
 import lombok.Data;
-import lombok.NoArgsConstructor;
-
 import java.util.ArrayList;
 import java.util.List;
 

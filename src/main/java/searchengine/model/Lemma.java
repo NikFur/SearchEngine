@@ -20,7 +20,7 @@ public class Lemma {
     @JoinColumn(name = "site_id", referencedColumnName = "id", nullable = false)
     private Site site;
 
-    @Column(nullable = false, length = 255)
+    @Column(nullable = false)
     private String lemma;
 
     @Column(nullable = false)
