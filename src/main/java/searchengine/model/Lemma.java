@@ -7,7 +7,9 @@ import java.util.ArrayList;
 import java.util.List;
 
 @Entity
-@Table(name = "lemma")
+@Table(name = "lemma", uniqueConstraints = {
+        @UniqueConstraint(columnNames = {"lemma", "site_id"})
+})
 @Data
 public class Lemma {
 

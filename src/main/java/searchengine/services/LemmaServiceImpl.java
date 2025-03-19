@@ -33,7 +33,7 @@ public class LemmaServiceImpl implements LemmaService {
         String[] words = cleanText.split("\\s+");
 
         for (String word : words) {
-            if (word.matches(".*\\d+.*")) { // Пропускаем слова с числами (номера телефонов и даты)
+            if (word.matches(".*\\d+.*")) {
                 log.debug("DEBUG: Пропущено слово с цифрами -> {}", word);
                 continue;
             }
